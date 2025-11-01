@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>浮动对话框 · 极简展示版</title>
+  <style>
+    :root{
+      --bg: #0b0c0f;
+      --titlebar-fallback: #f5f6f7;
+      --border: rgba(0,0,0,.15);
+      --shadow: 0 14px 32px rgba(0,0,0,.38), 0 6px 14px rgba(0,0,0,.25);
+      --radius: 12px;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+              "Microsoft YaHei", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --text: #111;
+      --overlay: .85;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; background: var(--bg);
+      font-family: var(--font); color: #fff;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      cursor: default;
+    }
+
+    /* 漂浮层（仅保留展示；允许点击窗口的按钮） */
+    #layer{
+      position: fixed; inset: 0; z-index: 1; pointer-events: auto;
+      opacity: var(--overlay);
+    }
+
+    /* 窗口外观（颜色在 JS 中随机设定） */
+    .macwin{
+      position: absolute; display: inline-block;
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      color: var(--text);
+      transform: translate3d(0,0,0);
+      will-change: transform;
+      user-select: none;
+      pointer-events: auto;
+      transition: opacity .25s ease;
+    }
+    .titlebar{
+      height: 32px; background: var(--titlebar-fallback);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; padding: 0 10px;
+      gap: 8px;
+    }
+    .traffic{ display: inline-flex; gap: 8px; align-items: center; }
+    .traffic .dot{
+      width: 12px; height: 12px; border-radius: 50%;
+      border: 1px solid rgba(0,0,0,.12);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.6);
+      transition: transform .12s ease;
+    }
+    .traffic .dot:hover{ transform: scale(1.12); }
+    .traffic .dot:active{ transform: scale(0.94); }
+    .traffic .close { background: #ff5f57; cursor: pointer; }
+    .traffic .min   { background: #febc2e; cursor: pointer; }
+    .traffic .zoom  { background: #28c840; cursor: pointer; }
+
+    .title{
+      font-size: 12px; color: rgba(0,0,0,.5);
+      letter-spacing: .2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    .content{ padding: 14px 16px; }
+    .content .line{
+      white-space: nowrap;  /* 横向单行，不换行 */
+      font-weight: 700; font-size: 18px; letter-spacing: .2px;
+      line-height: 1.25;
+      color: #111;
+    }
+
+    .badge{
+      position: absolute; right: 10px; top: 6px;
+      font-size: 11px; color:#374151; background: rgba(0,0,0,.06);
+      border: 1px solid rgba(0,0,0,.08); padding: 2px 6px; border-radius: 999px;
+    }
+  </style>
+</head>
+<body>
+  <div id="layer" aria-hidden="false"></div>
+
+  <script>
+    const $layer = document.getElementById('layer');
+
+    /* URL 参数：texts | count | speed | opacity
+       - texts: 用 | 或 , 分隔，或换行（%0A）
+       - count: 目标并发数量（5~200）
+       - speed: 上浮速度倍率（0.2~5）
+       - opacity: 漂浮层不透明度（0.3~1.0） */
+    const url = new URL(location.href);
+    const qs = (k, d) => url.searchParams.get(k) ?? d;
+
+    function parseTextsParam(raw){
+      if(!raw) return null;
+      const s = decodeURIComponent(raw).replace(/[|,]/g,'\n');
+      return s.split(/\r?\n/).map(t=>t.trim()).filter(Boolean);
+    }
+
+    const defaultPool = [
+      '今天有没有好好吃饭','喝水了吗？','坐久了记得活动一下～',
+      '注意休息，保护眼睛','按时吃饭，规律作息','今天也要元气满满！',
+      '吃饭要好好咀嚼～','补充蛋白质和蔬菜！'
+    ];
+    let pool = parseTextsParam(qs('texts','')) || defaultPool;
+    const countTarget = Math.max(5, Math.min(200, Number(qs('count', '60')) || 60));
+    const speedBase = Math.max(0.2, Math.min(5, Number(qs('speed', '1.0')) || 1.0));
+    const opacity = Math.max(0.3, Math.min(1.0, Number(qs('opacity', '0.85')) || 0.85));
+    $layer.style.opacity = opacity;
+
+    /* 工具 */
+    const pad = n => String(n).padStart(2,'0');
+    const nowStr = () => {
+      const d = new Date();
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    const rand = (a,b) => a + Math.random()*(b-a);
+    const pick = arr => arr[Math.floor(Math.random()*arr.length)];
+    function pastelHSL(){
+      const h = Math.floor(Math.random()*360);
+      const s = Math.floor(60 + Math.random()*15);  // 60~75
+      const l = Math.floor(85 + Math.random()*8);   // 85~93
+      return {h,s,l};
+    }
+
+    /* 集合 */
+    const windows = [];
+    let nextId = 1;
+    function removeById(id){
+      const idx = windows.findIndex(w => w.id === id);
+      if (idx >= 0){
+        windows[idx].el.remove();
+        windows.splice(idx, 1);
+      }
+    }
+
+    /* 生成窗口 */
+    function makeWindow(){
+      const id = nextId++;
+      const w = document.createElement('article');
+      w.className = 'macwin';
+      w.dataset.id = String(id);
+      w.style.width  = Math.round(rand(280, 420)) + 'px';
+      w.style.height = 'auto';
+      w.style.left = Math.round(rand(10, Math.max(20, window.innerWidth - parseFloat(w.style.width) - 10))) + 'px';
+      w.style.top  = (window.innerHeight + rand(10, 200)) + 'px';
+
+      // 随机配色
+      const c = pastelHSL();
+      const bg = `hsl(${c.h} ${c.s}% ${c.l}%)`;
+      const bar = `hsl(${c.h} ${Math.max(40, c.s-10)}% ${Math.min(98, c.l+4)}%)`;
+      const border = `hsl(${c.h} ${Math.max(30, c.s-25)}% ${Math.max(70, c.l-12)}%)`;
+      w.style.background = bg;
+      w.style.borderColor = border;
+
+      // 标题栏 + 三色键
+      const titlebar = document.createElement('div'); titlebar.className='titlebar';
+      titlebar.style.background = bar;
+      titlebar.style.borderBottomColor = border;
+      const traffic  = document.createElement('div'); traffic.className='traffic';
+      const closeBtn = document.createElement('span'); closeBtn.className='dot close'; closeBtn.title='关闭';
+      const minBtn   = document.createElement('span'); minBtn.className  ='dot min';   minBtn.title='最小化';
+      const zoomBtn  = document.createElement('span'); zoomBtn.className ='dot zoom';  zoomBtn.title='缩放';
+      traffic.append(closeBtn, minBtn, zoomBtn);
+      const title = document.createElement('div'); title.className='title'; title.textContent='Message';
+      titlebar.append(traffic, title);
+
+      // 文本
+      const content = document.createElement('div'); content.className='content';
+      const line = document.createElement('div'); line.className='line';
+      line.textContent = pick(pool);
+      content.append(line);
+
+      const badge = document.createElement('div'); badge.className='badge'; badge.textContent = nowStr();
+
+      w.append(titlebar, content, badge);
+      $layer.appendChild(w);
+
+      // 物理属性
+      const obj = {
+        id,
+        el: w,
+        x: parseFloat(w.style.left),
+        y: parseFloat(w.style.top),
+        w: w.offsetWidth, h: w.offsetHeight,
+        vx: (Math.random()<0.5 ? -1 : 1) * rand(0.2,0.6),
+        vy: - (1.0 * speedBase * rand(0.8,1.4)),
+        amp: rand(10,26),
+        freq: rand(0.004,0.010),
+        t: Math.random()*1000,
+        scale: 1.0,
+        zoomed: false,
+        minimizing: false,
+        opacity: 1.0
+      };
+      windows.push(obj);
+
+      // 交互：红=关闭；黄=最小化；绿=缩放
+      closeBtn.addEventListener('click', (e)=>{ e.stopPropagation(); removeById(id); }, {passive:true});
+      minBtn.addEventListener('click',  (e)=>{
+        e.stopPropagation();
+        const w = windows.find(w=>w.id===id);
+        if (!w || w.minimizing) return;
+        w.minimizing = true; w.vx = 0; w.amp = 0; w.vy = Math.abs(w.vy) + 0.6;
+      }, {passive:true});
+      zoomBtn.addEventListener('click', (e)=>{
+        e.stopPropagation();
+        const w = windows.find(w=>w.id===id);
+        if (!w) return;
+        w.zoomed = !w.zoomed;
+        w.scale = w.zoomed ? 1.15 : 1.0;
+        w.el.style.zIndex = w.zoomed ? 2 : 1;
+      }, {passive:true});
+    }
+
+    /* 连续生成（涓流式） */
+    let last = performance.now();
+    let spawnAcc = 0;
+    function computeInterval(){
+      const base = 20000 / countTarget; // 约 20 秒填满目标并发
+      return Math.max(60, Math.min(600, base));
+    }
+
+    function loop(now){
+      const dt = now - last; last = now;
+      spawnAcc += dt;
+
+      const interval = computeInterval();
+      while (spawnAcc >= interval && windows.length < countTarget){
+        makeWindow();
+        spawnAcc -= interval;
+      }
+      if (windows.length >= countTarget){
+        spawnAcc = Math.min(spawnAcc, interval);
+      }
+
+      for(let i = windows.length - 1; i >= 0; i--){
+        const win = windows[i];
+        win.t += 1;
+        const drift = Math.sin(win.t * win.freq) * win.amp * 0.08;
+        win.x += win.vx + drift * 0.02;
+        win.y += win.vy;
+
+        // 最小化淡出
+        if (win.minimizing){
+          win.opacity = Math.max(0, win.opacity - 0.02);
+          win.el.style.opacity = win.opacity;
+          win.y += 1.2;
+          if (win.y - win.h/2 > window.innerHeight + 120 || win.opacity <= 0){
+            win.el.remove();
+            windows.splice(i, 1);
+            continue;
+          }
+        }
+
+        const baseLeft = parseFloat(win.el.style.left);
+        const baseTop  = parseFloat(win.el.style.top);
+        win.el.style.transform = `translate(${win.x - baseLeft}px, ${win.y - baseTop}px) scale(${win.scale})`;
+
+        // 顶部回收
+        if (!win.minimizing && (win.y + win.h < -80)){
+          win.el.remove();
+          windows.splice(i, 1);
+        }
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    // 键盘：F 全屏切换（无 UI 版本仅保留快捷键）
+    document.addEventListener('keydown', async (e)=>{
+      if(e.key === 'f' || e.key === 'F'){
+        try{
+          if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
+          else await document.exitFullscreen();
+        }catch(_){ /* ignore */ }
+      }
+    });
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
